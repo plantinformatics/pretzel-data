@@ -28,63 +28,67 @@ import pytesseract
 import numpy as np
 import pandas as pd
 
-def extract_qtl_from_image(image_path):
+def resGrey(image_path):
     """
-    Extracts QTL names and their associated markers from a chromosome genetic map image.
+    In preparation for OCR, apply Super-Resolution to an image, then convert colours to grey.
+    Requires the file ESPCN_x4.pb, which is read from "./"
+    ESPCN_x{2,3,4}.pb are available at https://github.com/fannymonori/TF-ESPCN/raw/refs/heads/master/export/
     
     Args:
-        image_path (str): Path to the chromosome image file.
     
     Returns:
-        pd.DataFrame: DataFrame containing QTL information:
-                      ["Chromosome", "QTL Name", "Start Marker", "End Marker"]
+    """
+    img = cv2.imread(image_path)
+
+    # https://learnopencv.com/super-resolution-in-opencv/
+    sr = cv2.dnn_superres.DnnSuperResImpl_create()
+    path = "ESPCN_x4.pb"
+    # path = "ESPCN_x3.pb"
+
+    sr.readModel(path) 
+    # set the model by passing the value and the upsampling ratio
+    sr.setModel("espcn", 4)
+    # sr.setModel("espcn",3)
+    image = sr.upsample(img) # upscale the input image
+
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    sharpen = cv2.GaussianBlur(gray, (0, 0), 3)
+    sharpen = cv2.addWeighted(gray, 1.5, sharpen, -0.5, 0)
+    cv2.imwrite("preprocessed_2D.superRes_4.png", sharpen)
+
+def extract_qtl_by_color(image, hsv_img, lower_color, upper_color, color_name):
+    """
+    Extracts QTL names from a chromosome genetic map image based on the given HSV color range.
+
+    Args:
+        image (np.array): Original BGR image.
+        hsv_img (np.array): Image converted to HSV color space.
+        lower_color (np.array): Lower HSV bound for the first color range.
+        upper_color (np.array): Upper HSV bound for the first color range.
+        color_name (str): Name of the color being extracted ("red", "blue", etc.).
+
+    Returns:
+        list: Extracted QTL names detected from the specified color.
     """
 
-    # Extract chromosome name from filename (e.g., "4A.png" → "4A")
-    chromosome_name = image_path.split("/")[-1].replace(".png", "")
+    # Create color mask
+    mask = cv2.inRange(hsv_img, lower_color, upper_color)
 
-    # Load image
-    image = cv2.imread(image_path)
+    # Apply mask to extract QTL name regions and corresponding Marker names in the same color
+    qtl_region = cv2.bitwise_and(image, image, mask=mask)
+    # cv2.imshow(color_name, qtl_region)
+    # cv2.waitKey(0)
 
-    # Convert image to HSV color space (better for color filtering)
-    hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    # Perform OCR to extract QTL names
+    qtl_text = pytesseract.image_to_string(qtl_region, config="--psm 5 --oem 1")
+    # print(f"{color_name} QTL Text:", qtl_text)
 
-    # Define HSV color ranges for detecting red and blue QTL labels
-    lower_red1, upper_red1 = np.array([0, 100, 100]), np.array([10, 255, 255])
-    lower_red2, upper_red2 = np.array([170, 100, 100]), np.array([180, 255, 255])
-    lower_blue, upper_blue = np.array([110, 50, 50]), np.array([130, 255, 255])
+    # Extract QTL names using heuristics
+    qtl_names = [line.strip() for line in qtl_text.split("\n") if "Q" in line and "cas" in line]
 
-    # Create masks for red and blue QTL labels
-    mask_red1, mask_red2 = cv2.inRange(hsv_img, lower_red1, upper_red1), cv2.inRange(hsv_img, lower_red2, upper_red2)
-    mask_blue = cv2.inRange(hsv_img, lower_blue, upper_blue)
-
-    # Combine red masks
-    mask_red = cv2.bitwise_or(mask_red1, mask_red2)
-
-    # Extract QTL name regions using masks
-    qtl_red_region = cv2.bitwise_and(image, image, mask=mask_red)
-    # cv2.imshow("red", qtl_red_region)
-    qtl_blue_region = cv2.bitwise_and(image, image, mask=mask_blue)
-    # cv2.imshow("blue", qtl_blue_region)
-
-    # Perform OCR on extracted QTL name regions
-    qtl_red_text = pytesseract.image_to_string(qtl_red_region, config="--psm 5 --oem 1")
-    qtl_blue_text = pytesseract.image_to_string(qtl_blue_region, config="--psm 5 --oem 1")
-    print ('red', qtl_red_text);
-    print ('blue', qtl_blue_text);
-    # ... 1 for marker names
-    marker_red_text = pytesseract.image_to_string(qtl_red_region, config="--psm 1 --oem 1")
-    marker_blue_text = pytesseract.image_to_string(qtl_blue_region, config="--psm 1 --oem 1")
-    print ('red', marker_red_text);
-    print ('blue', marker_blue_text);
-
-
-    # Extract QTL names from OCR results
-    qtl_red_names = [line.strip() for line in qtl_red_text.split("\n") if "Q" in line and "cas" in line]
-    qtl_blue_names = [line.strip() for line in qtl_blue_text.split("\n") if "Q" in line and "cas" in line]
-
-    # Extract markers from full image OCR
-    ocr_text = pytesseract.image_to_string(image, config="--psm 1 --oem 1")
+    # Extract markers from color-masked image OCR
+    ocr_text = pytesseract.image_to_string(hsv_img, config="--psm 1 --oem 1")
     marker_data = []
     
     for line in ocr_text.split("\n"):
@@ -120,13 +124,45 @@ def extract_qtl_from_image(image_path):
                 qtl_table.append((chromosome_name, qtl_name, start_marker, end_marker, start_position, end_position, color_label))
 
     # Match QTLs with markers
-    match_qtl_to_markers(qtl_red_names, "Red")
-    match_qtl_to_markers(qtl_blue_names, "Blue")
+    match_qtl_to_markers(qtl_names, color_name)
 
     # Convert to DataFrame
     qtl_df = pd.DataFrame(qtl_table, columns=["Chromosome", "QTL Name", "Start Marker", "End Marker", "Start Position", "End Position", "Color"])
     
     return qtl_df
+
+
+
+def extract_qtl_from_image(image_path):
+    """
+    Extracts QTL names and their associated markers from a chromosome genetic map image.
+    
+    Args:
+        image_path (str): Path to the chromosome image file.
+    
+    Returns:
+        pd.DataFrame: DataFrame containing QTL information:
+                      ["Chromosome", "QTL Name", "Start Marker", "End Marker"]
+    """
+
+    # Extract chromosome name from filename (e.g., "4A.png" → "4A")
+    chromosome_name = image_path.split("/")[-1].replace(".png", "")
+
+    # Load image
+    image = cv2.imread(image_path)
+
+    # Convert image to HSV color space (better for color filtering)
+    hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+    # Define HSV color ranges for detecting red and blue QTL labels
+    red_lower, red_upper = np.array([0, 100, 100]), np.array([180, 255, 255])
+    blue_lower, blue_upper = np.array([110, 50, 50]), np.array([130, 255, 255])
+
+    # Extract QTL names for red and blue
+    qtl_red_df = extract_qtl_by_color(image, hsv_img, red_lower, red_upper, "Red")
+    qtl_blue_df = extract_qtl_by_color(image, hsv_img, blue_lower, blue_upper, "Blue")
+
+    return qtl_red_df # , qtl_blue_df
 
 # Example Usage:
 qtl_table = extract_qtl_from_image("4A.png")
